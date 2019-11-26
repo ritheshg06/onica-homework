@@ -1,0 +1,675 @@
+---
+
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: |-
+  Usage: aws cloudformation create-stack --profile $YOUR_AWS_PROFILE --region $YOUR_AWS_REGION --stack-name Onica-$(date +%s) --template-body file://ec2-cloudformation.yaml --parameters ParameterKey=KeyName,ParameterValue=$YOUR_SSH_KEY ParameterKey=SSMsshUserGroups,ParameterValue=$YOUR_SSM_SESSION_MANAGER_GROUP ParameterKey=sshIP,ParameterValue=$YOUR_IP_RANGE_CIDR --capabilities CAPABILITY_NAMED_IAM
+  You will be billed for the AWS resources used if you create a stack from this template!
+  Resources:
+    VPC
+        private subnet
+        public subnet
+    ELB
+        health check
+            replaces instances
+    ASG
+        launch config
+        scaling metric
+    SG HTTP Internet to ELB
+    SG HTTP ELB to ASG
+    SSH not open to the world
+    Web server displaying "hello world" and the instance hostname
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Security and SSH access
+        Parameters:
+          - KeyName
+          - SSMsshUserGroups
+          - sshIP
+      - Label:
+          default: EC2 Instance Configuration
+        Parameters:
+          - AMI
+          - InstanceSize
+
+Parameters:
+  AMI:
+    Description: (Optional) SSM parameter pointing to the latest Amazon Linux 2 AMI
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/amzn-ami-hvm-x86_64-gp2
+  InstanceSize:
+    Description: (Optional) Apache web server instance type/size
+    Type: String
+    Default: t2.micro
+    AllowedValues:
+      - t2.nano
+      - t2.micro
+      - t2.small
+      - t2.medium
+      - t3.nano
+      - t3.micro
+      - t3.small
+      - t3.medium
+      - t3a.nano
+      - t3a.micro
+      - t3a.small
+      - t3a.medium
+      - c5.large
+      - c5d.large
+      - m5.large
+      - m5d.large
+      - m5a.large
+  KeyName:
+    Description: Name of an existing EC2 KeyPair
+    Type: AWS::EC2::KeyPair::KeyName
+    MinLength: 1
+    MaxLength: 255
+    AllowedPattern: "[\\x20-\\x7E].+"
+    ConstraintDescription: Must be the name of an existing EC2 KeyPair. Only ASCII characters allowed!
+  SSMsshUserGroups:
+    Description: (Optional) Comma-delimited list of IAM Groups allowed to SSH to the EC2 instances via SSM Session Manager
+    Type: CommaDelimitedList
+    Default: ""
+  sshIP:
+    Description: (Optional) Internet-routable IP range from which SSH access is allowed (in addition to SSM Session Manager)
+    Type: String
+    MinLength: 9
+    MaxLength: 18
+    Default: "10.10.0.0/16"
+    AllowedPattern: "(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})/(\\d{1,2})"
+    ConstraintDescription: "Must be a valid IP CIDR range of the form x.x.x.x/x (e.g. 123.45.67.89/32 for a single IP)"
+
+Rules:
+  KeyPairsNotEmpty:
+    Assertions:
+      - Assert: !Not
+          - !Equals
+              - !Ref KeyName
+              - ""
+        AssertDescription: KeyName (EC2 instance SSH key name) must not be empty
+
+Resources:
+  EC2SSMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service: ["ec2.amazonaws.com"]
+            Action: "sts:AssumeRole"
+      Path: "/"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+        - "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: '/'
+      Roles:
+        - !Ref EC2SSMRole
+
+  EC2SSMsshPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Groups: !Ref SSMsshUserGroups
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        -
+          Effect: Allow
+          Action: "ssm:StartSession"
+          Resource: "arn:aws:ec2:*:*:instance/*"
+          Condition:
+            StringLike:
+              "iam:ResourceTag/Project": "Onica homework EC2 CloudFormation"
+        -
+          Effect: Allow
+          Action: "ssm:TerminateSession"
+          Resource: "arn:aws:ssm:*:*:session/${aws:username}-*"
+        -
+          Effect: Allow
+          Action:
+            - "ssm:DescribeSessions"
+            - "ssm:GetConnectionStatus"
+            - "ssm:DescribeInstanceProperties"
+            - "ec2:DescribeInstances"
+          Resource: "*"
+        -
+          Effect: Allow
+          Action:
+            - "ssm:CreateDocument"
+            - "ssm:UpdateDocument"
+            - "ssm:GetDocument"
+          Resource: !Join
+            - ""
+            - - "arn:aws:ssm:"
+              - !Ref "AWS::Region"
+              - ":"
+              - !Ref "AWS::AccountId"
+              - ":document/SSM-SessionManagerRunShell"
+
+  VPCID:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.10.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      InstanceTenancy: default
+      Tags:
+      -
+        Key: "Project"
+        Value: "Onica homework EC2 CloudFormation"
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        !Ref VPCID
+      CidrBlock: 10.10.1.0/24
+      MapPublicIpOnLaunch: false
+      AvailabilityZone:
+        !Select
+          - 0
+          - Fn::GetAZs: !Ref AWS::Region
+      Tags:
+      -
+        Key: "Project"
+        Value: "Onica homework EC2 CloudFormation"
+      -
+        Key: "Purpose"
+        Value: "Private subnet in the first AZ for EC2 instances"
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        !Ref VPCID
+      CidrBlock: 10.10.2.0/24
+      MapPublicIpOnLaunch: false
+      AvailabilityZone:
+        !Select
+          - 1
+          - Fn::GetAZs: !Ref AWS::Region
+      Tags:
+      -
+        Key: "Project"
+        Value: "Onica homework EC2 CloudFormation"
+      -
+        Key: "Purpose"
+        Value: "Private subnet in the second AZ for EC2 instances"
+
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        !Ref VPCID
+      CidrBlock: 10.10.3.0/24
+      MapPublicIpOnLaunch: true
+      AvailabilityZone:
+        !Select
+          - 0
+          - Fn::GetAZs: !Ref AWS::Region
+      Tags:
+      -
+        Key: "Project"
+        Value: "Onica homework EC2 CloudFormation"
+      -
+        Key: "Purpose"
+        Value: "First public subnet required by ALB"
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        !Ref VPCID
+      CidrBlock: 10.10.4.0/24
+      MapPublicIpOnLaunch: true
+      AvailabilityZone:
+        !Select
+          - 1
+          - Fn::GetAZs: !Ref AWS::Region
+      Tags:
+      -
+        Key: "Project"
+        Value: "Onica homework EC2 CloudFormation"
+      -
+        Key: "Purpose"
+        Value: "Second public subnet required by ALB"
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPCID
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPCID
+
+  PublicInternetRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicRouteTableAssociationAZ1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet1
+
+  PublicRouteTableAssociationAZ2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet2
+
+  NATPublicIP:
+    Type: AWS::EC2::EIP
+    DependsOn: VPCID
+    Properties:
+      Domain: vpc
+
+  PrivateNATGateway:
+    Type: AWS::EC2::NatGateway
+    DependsOn: NATPublicIP
+    Properties:
+      AllocationId: !GetAtt NATPublicIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPCID
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref PrivateNATGateway
+
+  PrivateRouteTableAssociationAZ1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateRouteTableAssociationAZ2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable
+
+  PublicNACL:
+    Type: AWS::EC2::NetworkAcl
+    Properties:
+      VpcId: !Ref VPCID
+      Tags:
+      - Key: "Name"
+        Value: "Public NACL"
+
+  PrivateNACL:
+    Type: AWS::EC2::NetworkAcl
+    Properties:
+      VpcId: !Ref VPCID
+      Tags:
+      - Key: "Name"
+        Value: "Private NACL"
+
+  PublicSubnet1NACLassociation:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      NetworkAclId: !Ref PublicNACL
+
+  PublicSubnet2NACLassociation:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      NetworkAclId: !Ref PublicNACL
+
+  PrivateSubnet1NACLassociation:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      NetworkAclId: !Ref PrivateNACL
+
+  PrivateSubnet2NACLassociation:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      NetworkAclId: !Ref PrivateNACL
+
+  PublicNACLinAllowAll:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PublicNACL
+      RuleNumber: 99
+      Protocol: -1
+      RuleAction: allow
+      Egress: false
+      CidrBlock: '0.0.0.0/0'
+      PortRange:
+        From: 0
+        To: 65535
+
+  PublicNACLoutAllowAll:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PublicNACL
+      RuleNumber: 99
+      Protocol: -1
+      RuleAction: allow
+      Egress: true
+      CidrBlock: '0.0.0.0/0'
+      PortRange:
+        From: 0
+        To: 65535
+
+  PrivateNACLinAllowUpperPorts:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PrivateNACL
+      RuleNumber: 99
+      Protocol: 6
+      RuleAction: allow
+      Egress: false
+      CidrBlock: '0.0.0.0/0'
+      PortRange:
+        From: 1024
+        To: 65535
+
+  PrivateNACLoutAllowVPC:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PrivateNACL
+      RuleNumber: 99
+      Protocol: 6
+      RuleAction: allow
+      Egress: true
+      CidrBlock: '0.0.0.0/0'
+      PortRange:
+        From: 0
+        To: 65535
+
+  EC2InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Allow 80 HTTP and 443 HTTPS from ALB SG and redirected SSH from AWS SSM Session Manager (no direct connections) and SSH from within the VPC CIDR range"
+      GroupName: "EC2-ALB-security-group"
+      Tags:
+      -
+        Key: "Project"
+        Value: "Onica homework EC2 CloudFormation"
+      -
+        Key: "Name"
+        Value: "EC2-ALB-security-group"
+      VpcId: !Ref VPCID
+      SecurityGroupIngress:
+      -
+        SourceSecurityGroupId: !Ref ALBSecurityGroup
+        Description: "Only allow HTTP 80 traffic from the ALB"
+        FromPort: 80
+        IpProtocol: "tcp"
+        ToPort: 80
+      -
+        CidrIp: !Ref sshIP
+        Description: "Only allow incoming SSH from a specific IP range"
+        FromPort: 22
+        ToPort: 22
+        IpProtocol: "tcp"
+      SecurityGroupEgress:
+      -
+        CidrIp: "0.0.0.0/0"
+        IpProtocol: "-1"
+
+  EC2InstanceFleet:
+    Type: AWS::EC2::EC2Fleet
+    DependsOn: PrivateNATGateway
+    Properties:
+      ExcessCapacityTerminationPolicy: termination
+      LaunchTemplateConfigs:
+      -
+        LaunchTemplateSpecification:
+          LaunchTemplateName: EC2httpdLaunchTemplate
+          Version: !GetAtt EC2httpdLaunchTemplate.LatestVersionNumber
+      OnDemandOptions:
+        AllocationStrategy: "lowest-price"
+      ReplaceUnhealthyInstances: true
+      TargetCapacitySpecification:
+        TotalTargetCapacity: 2
+        DefaultTargetCapacityType: "on-demand"
+      Type: maintain
+
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: "onica"
+      Scheme: "internet-facing"
+      Type: "application"
+      Subnets:
+      - !Ref PublicSubnet1
+      - !Ref PublicSubnet2
+      SecurityGroups:
+      - !Ref ALBSecurityGroup
+      IpAddressType: "ipv4"
+      LoadBalancerAttributes:
+      -
+        Key: "access_logs.s3.enabled"
+        Value: "false"
+      -
+        Key: "idle_timeout.timeout_seconds"
+        Value: "60"
+      -
+        Key: "deletion_protection.enabled"
+        Value: "false"
+      -
+        Key: "routing.http2.enabled"
+        Value: "true"
+      Tags:
+      -
+        Key: "Project"
+        Value: "Onica homework EC2 CloudFormation"
+
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Use with //only allow HTTP 80 from the ALB// setting on the EC2 instance SG"
+      GroupName: "ALB-incoming-HTTP-80"
+      VpcId: !Ref VPCID
+      SecurityGroupIngress:
+      -
+        CidrIp: "0.0.0.0/0"
+        Description: "ALB incoming HTTP 80 only"
+        FromPort: 80
+        IpProtocol: "tcp"
+        ToPort: 80
+      -
+        CidrIp: "0.0.0.0/0"
+        Description: "ALB incoming HTTPS 443 only"
+        FromPort: 443
+        IpProtocol: "tcp"
+        ToPort: 443
+      SecurityGroupEgress:
+      -
+        CidrIp: "0.0.0.0/0"
+        IpProtocol: "-1"
+      Tags:
+      -
+        Key: "Project"
+        Value: "Onica homework EC2 CloudFormation"
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckEnabled: true
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: "/"
+      Port: 80
+      Protocol: "HTTP"
+      HealthCheckPort: "traffic-port"
+      HealthCheckProtocol: "HTTP"
+      Matcher:
+        HttpCode: "200"
+      HealthCheckTimeoutSeconds: 5
+      UnhealthyThresholdCount: 3
+      HealthyThresholdCount: 5
+      VpcId: !Ref VPCID
+      Tags:
+      -
+        Key: "Project"
+        Value: "Onica homework EC2 CloudFormation"
+
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: "HTTP"
+      DefaultActions:
+      -
+        TargetGroupArn: !Ref TargetGroup
+        Type: "forward"
+
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn: EC2InstanceSecurityGroup
+    Properties:
+      AutoScalingGroupName: "ASG"
+      LaunchConfigurationName: !Ref AutoScalingLaunchConfig
+      MinSize: 1
+      MaxSize: 3
+      DesiredCapacity: 2
+      Cooldown: 300
+      TargetGroupARNs:
+      - !Ref TargetGroup
+      HealthCheckType: "EC2"
+      HealthCheckGracePeriod: 300
+      VPCZoneIdentifier:
+      - !Ref PrivateSubnet1
+      - !Ref PrivateSubnet2
+      TerminationPolicies:
+      - "Default"
+      ServiceLinkedRoleARN: !Ref "AWS::NoValue"
+
+  CPUAutoScalingPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    DependsOn: AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      PolicyType: "TargetTrackingScaling"
+      EstimatedInstanceWarmup: 600
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: "ASGAverageCPUUtilization"
+        TargetValue: 70
+        DisableScaleIn: false
+
+  EC2httpdLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    DependsOn: EC2InstanceSecurityGroup
+    Properties:
+      LaunchTemplateName: "EC2httpdLaunchTemplate"
+      LaunchTemplateData:
+        ImageId: !Ref AMI
+        KeyName: !Ref KeyName
+        SecurityGroupIds:
+        - !Ref EC2InstanceSecurityGroup
+        InstanceType: !Ref InstanceSize
+        IamInstanceProfile:
+          Arn: !GetAtt EC2InstanceProfile.Arn
+        Monitoring:
+          Enabled: true
+        TagSpecifications:
+        -
+          ResourceType: "instance"
+          Tags:
+          -
+            Key: "Project"
+            Value: "Onica homework EC2 CloudFormation"
+          -
+            Key: "AutoScalingGroupName"
+            Value: "ASG"
+          -
+            Key: "ApplicationLoadBalancer"
+            Value: "HTTP-80-ALB"
+        UserData: !Base64 |
+          #!/bin/bash -xe
+          while ! ifconfig | grep -F "10.10." > /dev/null; do sleep 5; done
+          yum update -y
+          yum install -y https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/linux_amd64/amazon-ssm-agent.rpm
+          yum install httpd -y
+          usermod -a -G apache ec2-user
+          chown -R ec2-user:apache /var/www
+          chmod 2775 /var/www && find /var/www -type d -exec chmod 2775 {} \;
+          find /var/www -type f -exec chmod 0664 {} \;
+          touch /var/www/html/index.html
+          echo "hello world from $(hostname)" > /var/www/html/index.html
+          chmod 755 index.html
+          service httpd start
+          chkconfig --add httpd
+          chkconfig httpd on
+
+  AutoScalingLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    DependsOn: EC2InstanceSecurityGroup
+    Properties:
+      LaunchConfigurationName: "no-public-ips"
+      ImageId: !Ref AMI
+      KeyName: !Ref KeyName
+      SecurityGroups:
+      - !Ref EC2InstanceSecurityGroup
+      InstanceType: !Ref InstanceSize
+      InstanceMonitoring: true
+      AssociatePublicIpAddress: false
+      UserData: !Base64 |
+        #!/bin/bash -xe
+        while ! ifconfig | grep -F "10.10." > /dev/null; do sleep 5; done
+        yum update -y
+        yum install -y https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/linux_amd64/amazon-ssm-agent.rpm
+        yum install -y httpd
+        usermod -a -G apache ec2-user
+        chown -R ec2-user:apache /var/www
+        chmod 2775 /var/www && find /var/www -type d -exec chmod 2775 {} \;
+        find /var/www -type f -exec chmod 0664 {} \;
+        touch /var/www/html/index.html
+        echo "hello world from $(hostname)" > /var/www/html/index.html
+        chmod 755 index.html
+        service httpd start
+        chkconfig --add httpd
+        chkconfig httpd on
+
+  S3endpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPCID
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.s3"
+      VpcEndpointType: "Gateway"
+      RouteTableIds:
+        - !Ref PrivateRouteTable
+        - !Ref PublicRouteTable
+      PolicyDocument:
+        Statement:
+        -
+          Sid: "Amazon Linux AMI Repository Access"
+          Principal: "*"
+          Action: "s3:GetObject"
+          Effect: "Allow"
+          Resource: 
+            - "arn:aws:s3:::packages.*.amazonaws.com/*"
+            - "arn:aws:s3:::repo.*.amazonaws.com/*"
+            - "arn:aws:s3:::amazonlinux.*.amazonaws.com/*"

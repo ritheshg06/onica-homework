@@ -37,7 +37,7 @@ If you like a challenge, you’ll love it here, because we’re solving complex 
 * Working with customers engineering teams on a wide variety of projects
 * Writing infrastructure as code (CloudFormation, Terraform)
 
-## Qualifications & Experience                   
+## Qualifications & Experience
 
 ### Required:
 * Proficient in networking and network security
