@@ -1,0 +1,5 @@
+---
+KeyName: devbox22
+SSMsshUserGroups: gods
+sshIP: "10.10.11.12/32"
+InstanceSize: "t2.micro"
