@@ -686,3 +686,13 @@ Resources:
             - "arn:aws:s3:::packages.*.amazonaws.com/*"
             - "arn:aws:s3:::repo.*.amazonaws.com/*"
             - "arn:aws:s3:::amazonlinux.*.amazonaws.com/*"
+
+  R53CNAME:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: Z2697RI308KILL
+      Name: onica.homewor.cc
+      ResourceRecords:
+      - !GetAtt ApplicationLoadBalancer.DNSName
+      TTL: '300'
+      Type: CNAME
