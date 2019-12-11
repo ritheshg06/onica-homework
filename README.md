@@ -22,6 +22,10 @@ I chose the first option arbitrarily.
 ### SSH access
 Options for SSH access are provided, but complete setup is left to the end user. Either public EIPs must be attached to the EC2 instances for direct SSH access, or SSM must be configured for SSM Session Manager access. Both of these items are out of scope, but simple enough for the end user to set up.
 
+## Requirements:
+1. An AWS account (note that free tier will be exceeded!)
+2. Permission to create IAM objects via CF
+
 ## Deployment
 The simplest deployment - assuming the user has the AWS CLI installed, proper IAM user permissions, etc. - is as follows:
 ```bash
@@ -35,6 +39,7 @@ aws cloudformation validate-template --template-body file:///ec2-cloudformation.
 ```
 
 ### In-depth testing via TaskCat
+#### Install TaskCat
 ```bash
 curl -s https://raw.githubusercontent.com/aws-quickstart/taskcat/master/installer/docker-installer.sh | sh
 ```
@@ -43,11 +48,13 @@ or
 pip3 install taskcat --user # Requires latest Python 3.5+
 ```
 
+#### Run TaskCat
 ```bash
-taskcat -c onica-homework/ec2-cloudformation/ci/taskcat.yml
+taskcat lint | less # Just an example; I pipe to `less` for easy perusal of lengthy output.
 ```
 
-See `./taskcat_outputs/index.html` for results.
+### Notes
+I have left some TaskCat errors and warnings in place as a demonstration. The CF template actually works in practice.
 
 ## Sources
 I relied upon both my own previous work (such as my [CloudFront/WAF CloudFormation template](https://github.com/sskalnik/cloudfront_blueprint)), and the official AWS documentation regarding best-practice AWS standards (such as [the latest guide to bastions... without bastions](https://aws.amazon.com/blogs/infrastructure-and-automation/toward-a-bastion-less-world/)).
