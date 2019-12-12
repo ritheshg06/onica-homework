@@ -91,6 +91,9 @@ Rules:
               - ""
         AssertDescription: KeyName (EC2 instance SSH key name) must not be empty
 
+Conditions:
+  SSMsshUserGroupsNotBlank: !Not [ !Equals [ !Join [ "", !Ref SSMsshUserGroups ], "" ] ]
+
 Resources:
   EC2SSMRole:
     Type: AWS::IAM::Role
@@ -116,6 +119,7 @@ Resources:
 
   EC2SSMsshPolicy:
     Type: AWS::IAM::ManagedPolicy
+    Condition: SSMsshUserGroupsNotBlank
     Properties:
       Groups: !Ref SSMsshUserGroups
       PolicyDocument:
